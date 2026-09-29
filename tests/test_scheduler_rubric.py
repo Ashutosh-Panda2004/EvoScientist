@@ -234,6 +234,49 @@ def test_scheduler_grader_is_built_with_the_explicit_strategy(tmp_path):
     assert response_format.schema is GraderResponse
 
 
+def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
+    tmp_path, monkeypatch
+):
+    """DeepSeek rejects json_schema response_format and, in thinking mode, forced tool_choice."""
+    import json
+
+    import httpx
+
+    from EvoScientist.llm import get_chat_model
+    from tests.fakes import deepseek_tool_call_response
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    bodies = []
+    criteria = [
+        {"name": "report.md exists", "passed": True},
+        {"name": "report.md states F1", "passed": False, "gap": "no F1 reported"},
+    ]
+    verdict = {"result": "needs_revision", "explanation": "x", "criteria": criteria}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200, json=deepseek_tool_call_response("GraderResponse", verdict)
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = get_chat_model(
+            "deepseek-v4-pro", provider="deepseek", http_client=client
+        )
+        kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path, aux_model=model)
+        grader = kwargs["middleware"][-1]._ensure_grader()
+        result = grader.invoke(
+            {"messages": [HumanMessage("grade the deliverables")]},
+            config={"recursion_limit": 20},
+        )
+
+    assert "response_format" not in bodies[0]
+    assert bodies[0]["tool_choice"] == "required"
+    assert bodies[0]["thinking"] == {"type": "disabled"}
+    assert result["structured_response"].result == "needs_revision"
+    assert result["structured_response"].criteria == criteria
+
+
 def test_scheduler_grader_builds_against_current_upstream_attributes(tmp_path):
     """Unpatched build: the private deepagents names we mirror still exist."""
     kwargs, _backend, _aux, _stub = _build(
