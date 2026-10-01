@@ -691,6 +691,7 @@ _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
         "webui_host",
         "langgraph_dev_keepalive",
         "shell_allow_list",
+        "mirror",
     }
 )
 
@@ -930,6 +931,15 @@ def start_langgraph_dev(
         )
 
     workspace_dir = workspace_dir or Path.cwd()
+
+    # Install Node for npx MCP servers here, where progress is visible and no
+    # health deadline applies; the server itself never downloads it.
+    try:
+        from ..mcp.client import _ensure_node_for_stdio, load_mcp_config
+
+        _ensure_node_for_stdio(load_mcp_config())
+    except Exception:
+        logger.warning("Could not check Node.js for MCP servers", exc_info=True)
 
     # Defensive: handle a port that's occupied but not serving /ok.
     # Three cases:

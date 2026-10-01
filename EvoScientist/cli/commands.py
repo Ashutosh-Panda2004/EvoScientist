@@ -248,6 +248,76 @@ def onboard(
 
 
 # =============================================================================
+# Setup command
+# =============================================================================
+
+
+@app.command()
+def setup(
+    manifest: bool = typer.Option(
+        False, "--manifest", help="Print the setup stages as JSON and exit"
+    ),
+    stage: str | None = typer.Option(
+        None, "--stage", help="Run only this stage (ids from --manifest)"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON event per line instead of progress text"
+    ),
+    cn: bool = typer.Option(
+        False, "--cn", help="Download from mainland China mirrors and remember it"
+    ),
+):
+    """Install what EvoScientist needs beyond the Python package (Node.js).
+
+    Runs every stage that applies to this platform, in order. With ``--json``
+    stdout carries only the JSON event lines; everything else goes to stderr.
+    """
+    import json
+    import sys
+
+    from ..config import load_config, set_config_value
+    from ..setup import STAGES, get_stage, run_stages
+    from ..setup import manifest as setup_manifest
+    from ..setup.protocol import ConsoleEmitter, JsonEmitter
+
+    if manifest:
+        sys.stdout.write(json.dumps(setup_manifest()) + "\n")
+        return
+
+    if json_output:
+        # The shared console also carries log warnings; stdout belongs to the
+        # event lines.
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+
+    selected = tuple(s for s in STAGES if s.applies())
+    if stage is not None:
+        found = get_stage(stage)
+        if found is None:
+            known = ", ".join(s.id for s in STAGES)
+            typer.echo(f"Unknown stage {stage!r}. Known stages: {known}", err=True)
+            raise typer.Exit(2)
+        selected = (found,)
+
+    if cn:
+        try:
+            set_config_value("mirror", "cn")
+        except OSError as exc:
+            # Saving the choice is secondary; this run still uses the mirror.
+            logging.getLogger(__name__).warning(
+                f"Could not save mirror: cn to the config ({exc}); "
+                "using the mirror for this run only."
+            )
+    mirror = "cn" if cn else load_config().mirror
+
+    emit = JsonEmitter() if json_output else ConsoleEmitter(console)
+    code = run_stages(selected, emit, mirror)
+    if code:
+        raise typer.Exit(code)
+
+
+# =============================================================================
 # `EvoSci configure <section>` — re-run one onboarding section
 # =============================================================================
 

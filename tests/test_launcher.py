@@ -416,10 +416,104 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
 # Runner preflight
 # --------------------------------------------------------------------------- #
 def test_npx_runner_preflight_reports_node_missing(monkeypatch):
+    from EvoScientist.setup import node as setup_node
+    from EvoScientist.setup.protocol import StageError
+
+    def offline(*_a, **_k):
+        raise StageError("download_failed", "offline")
+
     monkeypatch.setattr(lm.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(setup_node, "ensure_node", offline)
     with pytest.raises(lm.LauncherError) as ei:
         lm.NpxWebUIRunner().preflight(_cfg())
     assert ei.value.code == "node_missing"
+    assert "offline" in ei.value.message
+    assert "EvoSci setup" in ei.value.detail
+
+
+def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
+    """No npx on PATH: preflight installs the private Node and activates it."""
+    from EvoScientist.setup import node as setup_node
+
+    state = {"installed": False, "active": False}
+    monkeypatch.setattr(
+        lm.shutil, "which", lambda _n: "/p/npx" if state["active"] else None
+    )
+
+    def ensure(*_a, **kw):
+        # The install must report progress; a silent download looks frozen.
+        assert callable(kw.get("progress"))
+        state.update(installed=True)
+
+    monkeypatch.setattr(setup_node, "ensure_node", ensure)
+    monkeypatch.setattr(
+        setup_node, "activate_runtime", lambda: state.update(active=True)
+    )
+    lm.NpxWebUIRunner().preflight(_cfg())
+    assert state == {"installed": True, "active": True}
+
+
+def test_npx_runner_preflight_with_npx_does_not_install(monkeypatch):
+    from EvoScientist.setup import node as setup_node
+
+    def boom(*_a, **_k):
+        raise AssertionError("ensure_node must not run when npx is on PATH")
+
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/usr/bin/npx")
+    monkeypatch.setattr(setup_node, "ensure_node", boom)
+    lm.NpxWebUIRunner().preflight(_cfg())
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_npx_runner_start_cleans_env_only_for_private_node(monkeypatch, private):
+    from EvoScientist.setup import node as setup_node
+
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return object()
+
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
+    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "default")
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
+    lm.NpxWebUIRunner().start(_cfg(), env)
+    if private:
+        assert captured["env"] == {"PATH": "p"}
+    else:
+        assert captured["env"] == env
+
+
+@pytest.mark.parametrize(
+    ("private", "user_registry", "expected"),
+    [
+        (True, "r", "https://registry.npmmirror.com"),  # user's npm_config_* stripped
+        (False, None, "https://registry.npmmirror.com"),
+        (False, "r", "r"),  # a registry the user set in the environment wins
+    ],
+)
+def test_npx_runner_start_uses_npmmirror_under_the_cn_mirror(
+    monkeypatch, private, user_registry, expected
+):
+    from EvoScientist.setup import node as setup_node
+
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return object()
+
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
+    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "cn")
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {"PATH": "p"}
+    if user_registry:
+        env["npm_config_registry"] = user_registry
+    lm.NpxWebUIRunner().start(_cfg(), env)
+    assert captured["env"]["npm_config_registry"] == expected
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):
