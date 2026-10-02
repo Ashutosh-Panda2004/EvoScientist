@@ -267,7 +267,8 @@ def setup(
         False, "--cn", help="Download from mainland China mirrors and remember it"
     ),
 ):
-    """Install what EvoScientist needs beyond the Python package (Node.js).
+    """Install what EvoScientist needs beyond the Python package (Node.js, and a
+    Python for the agent's shell when none is on PATH).
 
     Runs every stage that applies to this platform, in order. With ``--json``
     stdout carries only the JSON event lines; everything else goes to stderr.
@@ -615,6 +616,8 @@ def _ensure_async_subagent_server(
             "them with [bold]EvoSci server stop[/bold], then restart "
             "EvoSci.[/yellow]"
         )
+    if _lg_manager.AGENT_PYTHON_DRIFT is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_PYTHON_DRIFT)}[/yellow]")
 
     # The backend is shared by every UI mode, so the exposure warning lives
     # here, not just in deploy/WebUI. Gated on the server being up: warning

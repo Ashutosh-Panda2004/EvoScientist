@@ -12,8 +12,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from . import node
-from .protocol import PROTOCOL, Emitter, StageError, make_event
+from . import node, research_env
+from .protocol import PROTOCOL, Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +23,25 @@ class Stage:
     """One setup stage.
 
     ``platforms`` lists the ``sys.platform`` values the stage applies to
-    (None = every platform). ``run(emit, mirror)`` returns the ``done``
-    message and ``detail`` object, or raises :class:`StageError`.
+    (None = every platform). ``run(emit, mirror)`` returns a
+    :class:`StageResult` (``done`` or ``skipped``) or raises
+    :class:`StageError`. It emits only ``running`` events itself; the runner
+    emits the one terminal event.
     """
 
     id: str
     title: str
     platforms: frozenset[str] | None
-    run: Callable[[Emitter, str], tuple[str, dict[str, Any]]]
+    run: Callable[[Emitter, str], StageResult]
 
     def applies(self) -> bool:
         return self.platforms is None or sys.platform in self.platforms
 
 
-STAGES: tuple[Stage, ...] = (Stage("node", "Node.js", None, node.run_stage),)
+STAGES: tuple[Stage, ...] = (
+    Stage("node", "Node.js", None, node.run_stage),
+    Stage("research-env", "Python research environment", None, research_env.run_stage),
+)
 
 
 def get_stage(stage_id: str) -> Stage | None:
@@ -52,7 +57,13 @@ def manifest() -> dict[str, Any]:
 
 
 def run_stages(stages: Iterable[Stage], emit: Emitter, mirror: str) -> int:
-    """Run ``stages`` in order; stop at the first error. Returns an exit code."""
+    """Run every stage in order; returns 1 if any failed, else 0.
+
+    The stages do not depend on each other, so a failed one (e.g. a blocked
+    Node download) does not stop the rest; each still ends with its own
+    terminal event.
+    """
+    failed = False
     for stage in stages:
         if not stage.applies():
             emit(
@@ -60,10 +71,11 @@ def run_stages(stages: Iterable[Stage], emit: Emitter, mirror: str) -> int:
             )
             continue
         try:
-            message, detail = stage.run(emit, mirror)
+            result = stage.run(emit, mirror)
         except StageError as exc:
             emit(make_event(stage.id, "error", message=exc.message, code=exc.code))
-            return 1
+            failed = True
+            continue
         except Exception as exc:
             logger.exception(f"Setup stage {stage.id} failed unexpectedly")
             emit(
@@ -74,9 +86,14 @@ def run_stages(stages: Iterable[Stage], emit: Emitter, mirror: str) -> int:
                     code="install_failed",
                 )
             )
-            return 1
-        emit(make_event(stage.id, "done", message=message, detail=detail))
-    return 0
+            failed = True
+            continue
+        emit(
+            make_event(
+                stage.id, result.status, message=result.message, detail=result.detail
+            )
+        )
+    return 1 if failed else 0
 
 
 __all__ = [
@@ -84,6 +101,7 @@ __all__ = [
     "STAGES",
     "Stage",
     "StageError",
+    "StageResult",
     "get_stage",
     "manifest",
     "run_stages",

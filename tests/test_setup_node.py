@@ -313,7 +313,7 @@ def test_stage_reports_download_progress_lines(env, monkeypatch):
     monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(node, "download", dl.download)
     events: list[dict] = []
-    _message, detail = node.run_stage(events.append, "default")
+    detail = node.run_stage(events.append, "default").detail
     assert {(e["stage"], e["status"]) for e in events} == {("node", "running")}
     downloading = [
         e["progress"] for e in events if e["message"].startswith("Downloading")
@@ -635,3 +635,11 @@ def test_node_child_env_strips_npm_config_and_node_options():
     }
     assert node.node_child_env(env, private=True) == {"PATH": "p"}
     assert node.node_child_env(env, private=False) == env
+
+
+def test_run_stage_returns_done_with_the_node_detail(monkeypatch):
+    info = node.NodeInfo("system", "22.11.0", Path("/usr/bin/node"))
+    monkeypatch.setattr(node, "ensure_node", lambda mirror, report: info)
+    result = node.run_stage(lambda event: None, "default")
+    assert result.status == "done"
+    assert result.detail == info.detail()
