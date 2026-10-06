@@ -2,20 +2,44 @@
 
 Every git command for skills and the MCP index goes through :func:`run_git`,
 so a missing git binary surfaces as one readable :class:`GitNotFoundError` on
-every path instead of a raw ``FileNotFoundError``.
+every path instead of a raw ``FileNotFoundError``, and no command waits for
+HTTPS credentials.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 
 logger = logging.getLogger(__name__)
 
 CLONE_TIMEOUT = 120  # seconds
 
+# A missing or private repository makes GitHub ask for credentials. Git would
+# then open a credential helper window or wait for a username on the terminal.
+# Terminal and askpass prompts are turned off (askpass programs run before git
+# checks GIT_TERMINAL_PROMPT, so they are cleared too) and Git Credential
+# Manager is told not to prompt, so a stored credential is still used (the
+# user's own helpers, e.g. the one ``gh auth setup-git`` writes) and anything
+# else fails at once. Only our own PortableGit, whose ``etc\gitconfig`` names
+# the ``helper-selector`` picker, gets its helper list reset. This covers
+# HTTPS, the only scheme our URLs use. A user's ``url.<ssh>.insteadOf`` rule
+# turns them into SSH, whose own prompts (key passphrase, host key) these
+# settings do not reach; ``core.sshCommand`` is left alone so the user's ssh
+# setup keeps working.
+_NON_INTERACTIVE = ["-c", "core.askPass="]
+_PORTABLEGIT_ONLY = ["-c", "credential.helper="]
+_ASKPASS_VARS = ("GIT_ASKPASS", "SSH_ASKPASS")
+
 
 def _install_hint() -> str:
+    if sys.platform == "win32":
+        return (
+            "install Git from https://git-scm.com/downloads, or run "
+            "`EvoSci setup`, and try again"
+        )
     return "install Git from https://git-scm.com/downloads and try again"
 
 
@@ -38,22 +62,73 @@ class GitNotFoundError(RuntimeError):
         super().__init__(message or _not_found_message())
 
 
-def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
-    """Run ``git <args>`` and capture its text output.
+def _git_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k.upper() not in _ASKPASS_VARS}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git Credential Manager answers from its store or fails, never prompts
+    # (``0`` / ``false`` are the current spellings, ``never`` the legacy one).
+    env["GCM_INTERACTIVE"] = "0"
+    return env
 
-    Raises :class:`GitNotFoundError` when git cannot be started.
+
+def _portablegit_args() -> list[str]:
+    """``-c credential.helper=`` when the git on PATH is our PortableGit."""
+    if sys.platform != "win32":
+        return []
+    from .setup import git as setup_git
+
+    return list(_PORTABLEGIT_ONLY) if setup_git.private_git_on_path() else []
+
+
+def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *_NON_INTERACTIVE, *_portablegit_args(), *args],
+        capture_output=True,
+        # git writes paths as UTF-8 (e.g. "Cloning into '<%TEMP% path>'"). With
+        # the ANSI code page a non-ASCII profile name kills subprocess's reader
+        # thread on Windows: a stray traceback, and stderr silently None.
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        env=_git_env(),
+    )
+
+
+def _activate_private_git() -> bool:
+    """On Windows, put a PortableGit recorded since start-up on ``PATH``.
+
+    The missing-git message tells Windows users to run ``EvoSci setup``; when
+    they do that in another terminal, this process only learns about the new
+    Git here. Returns True when a recorded PortableGit was put on ``PATH``.
+    """
+    if sys.platform != "win32":
+        return False
+    from .setup import git as setup_git
+
+    return setup_git.activate_runtime() is not None
+
+
+def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run ``git <args>`` non-interactively and capture its text output.
+
+    Raises :class:`GitNotFoundError` when git cannot be started (on Windows
+    after one retry with a PortableGit recorded since start-up).
     ``subprocess.TimeoutExpired`` propagates; a non-zero exit is returned for
     the caller to judge.
     """
     try:
-        return subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=timeout
-        )
+        return _run(args, timeout)
     except OSError as exc:
         logger.debug("could not start git", exc_info=True)
+        missing = isinstance(exc, FileNotFoundError)
+        if missing and _activate_private_git():
+            try:
+                return _run(args, timeout)
+            except OSError:
+                logger.debug("could not start the private git either", exc_info=True)
         # Only a missing binary gets the install hint; anything else (EACCES,
         # EMFILE, a Windows policy block) names its cause, because git is there.
-        if isinstance(exc, FileNotFoundError):
+        if missing:
             raise GitNotFoundError() from exc
         raise GitNotFoundError(
             f"git could not be started: {exc.strerror or exc}"
@@ -63,10 +138,15 @@ def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[s
 def clone_repo(repo: str, ref: str | None, dest: str) -> None:
     """Shallow-clone ``github.com/<repo>`` (at ``ref`` if given) into ``dest``.
 
-    Raises :class:`GitNotFoundError` without git, and ``RuntimeError`` on a
-    timeout or a failed clone.
+    Files keep the repository's line endings: CRLF breaks shell scripts in
+    skills. ``core.autocrlf=false`` covers files Git does not treat as text;
+    ``core.eol=lf`` covers the ones a ``text`` / ``text=auto`` attribute marks,
+    which would otherwise check out with ``native`` (CRLF on Windows). An
+    explicit ``eol=crlf`` attribute still wins. Raises
+    :class:`GitNotFoundError` without git, and ``RuntimeError`` on a timeout or
+    a failed clone.
     """
-    args = ["clone", "--depth", "1"]
+    args = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "clone", "--depth", "1"]
     if ref:
         args += ["--branch", ref]
     args += [f"https://github.com/{repo}.git", dest]
